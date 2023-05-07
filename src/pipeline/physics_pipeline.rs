@@ -496,142 +496,149 @@ impl PhysicsPipeline {
         self.clear_modified_bodies(bodies, &mut modified_bodies);
         removed_colliders.clear();
 
-        let mut remaining_time = integration_parameters.dt;
-        let mut integration_parameters = *integration_parameters;
+        for _ in 0..integration_parameters.substeps {
+            let mut remaining_time =
+                integration_parameters.dt / integration_parameters.substeps as Real;
+            let mut integration_parameters = *integration_parameters;
 
-        let (ccd_is_enabled, mut remaining_substeps) =
-            if integration_parameters.max_ccd_substeps == 0 {
-                (false, 1)
-            } else {
-                (true, integration_parameters.max_ccd_substeps)
-            };
-
-        while remaining_substeps > 0 {
-            // If there are more than one CCD substep, we need to split
-            // the timestep into multiple intervals. First, estimate the
-            // size of the time slice we will integrate for this substep.
-            //
-            // Note that we must do this now, before the constrains resolution
-            // because we need to use the correct timestep length for the
-            // integration of external forces.
-            //
-            // If there is only one or zero CCD substep, there is no need
-            // to split the timetsep interval. So we can just skip this part.
-            if ccd_is_enabled && remaining_substeps > 1 {
-                // NOTE: Take forces into account when updating the bodies CCD activation flags
-                //       these forces have not been integrated to the body's velocity yet.
-                let ccd_active =
-                    ccd_solver.update_ccd_active_flags(islands, bodies, remaining_time, true);
-                let first_impact = if ccd_active {
-                    ccd_solver.find_first_impact(
-                        remaining_time,
-                        islands,
-                        bodies,
-                        colliders,
-                        narrow_phase,
-                    )
+            let (ccd_is_enabled, mut remaining_substeps) =
+                if integration_parameters.max_ccd_substeps == 0 {
+                    (false, 1)
                 } else {
-                    None
+                    (true, integration_parameters.max_ccd_substeps)
                 };
 
-                if let Some(toi) = first_impact {
-                    let original_interval = remaining_time / (remaining_substeps as Real);
-
-                    if toi < original_interval {
-                        integration_parameters.dt = original_interval;
+            while remaining_substeps > 0 {
+                // If there are more than one CCD substep, we need to split
+                // the timestep into multiple intervals. First, estimate the
+                // size of the time slice we will integrate for this substep.
+                //
+                // Note that we must do this now, before the constrains resolution
+                // because we need to use the correct timestep length for the
+                // integration of external forces.
+                //
+                // If there is only one or zero CCD substep, there is no need
+                // to split the timetsep interval. So we can just skip this part.
+                if ccd_is_enabled && remaining_substeps > 1 {
+                    // NOTE: Take forces into account when updating the bodies CCD activation flags
+                    //       these forces have not been integrated to the body's velocity yet.
+                    let ccd_active =
+                        ccd_solver.update_ccd_active_flags(islands, bodies, remaining_time, true);
+                    let first_impact = if ccd_active {
+                        ccd_solver.find_first_impact(
+                            remaining_time,
+                            islands,
+                            bodies,
+                            colliders,
+                            narrow_phase,
+                        )
                     } else {
-                        integration_parameters.dt =
-                            toi + (remaining_time - toi) / (remaining_substeps as Real);
+                        None
+                    };
+
+                    if let Some(toi) = first_impact {
+                        let original_interval = remaining_time / (remaining_substeps as Real);
+
+                        if toi < original_interval {
+                            integration_parameters.dt = original_interval;
+                        } else {
+                            integration_parameters.dt =
+                                toi + (remaining_time - toi) / (remaining_substeps as Real);
+                        }
+
+                        remaining_substeps -= 1;
+                    } else {
+                        // No impact, don't do any other substep after this one.
+                        integration_parameters.dt = remaining_time;
+                        remaining_substeps = 0;
                     }
 
-                    remaining_substeps -= 1;
+                    remaining_time -= integration_parameters.dt;
+
+                    // Avoid substep length that are too small.
+                    if remaining_time <= integration_parameters.min_ccd_dt {
+                        integration_parameters.dt += remaining_time;
+                        remaining_substeps = 0;
+                    }
                 } else {
-                    // No impact, don't do any other substep after this one.
                     integration_parameters.dt = remaining_time;
+                    remaining_time = 0.0;
                     remaining_substeps = 0;
                 }
 
-                remaining_time -= integration_parameters.dt;
+                self.counters.ccd.num_substeps += 1;
 
-                // Avoid substep length that are too small.
-                if remaining_time <= integration_parameters.min_ccd_dt {
-                    integration_parameters.dt += remaining_time;
-                    remaining_substeps = 0;
-                }
-            } else {
-                integration_parameters.dt = remaining_time;
-                remaining_time = 0.0;
-                remaining_substeps = 0;
-            }
-
-            self.counters.ccd.num_substeps += 1;
-
-            self.interpolate_kinematic_velocities(&integration_parameters, islands, bodies);
-            self.build_islands_and_solve_velocity_constraints(
-                gravity,
-                &integration_parameters,
-                islands,
-                narrow_phase,
-                bodies,
-                colliders,
-                impulse_joints,
-                multibody_joints,
-                events,
-            );
-
-            // If CCD is enabled, execute the CCD motion clamping.
-            if ccd_is_enabled {
-                // NOTE: don't the forces into account when updating the CCD active flags because
-                //       they have already been integrated into the velocities by the solver.
-                let ccd_active = ccd_solver.update_ccd_active_flags(
+                self.interpolate_kinematic_velocities(&integration_parameters, islands, bodies);
+                self.build_islands_and_solve_velocity_constraints(
+                    gravity,
+                    &integration_parameters,
                     islands,
+                    narrow_phase,
                     bodies,
-                    integration_parameters.dt,
-                    false,
+                    colliders,
+                    impulse_joints,
+                    multibody_joints,
+                    events,
                 );
-                if ccd_active {
-                    self.run_ccd_motion_clamping(
-                        &integration_parameters,
+
+                // If CCD is enabled, execute the CCD motion clamping.
+                if ccd_is_enabled {
+                    // NOTE: don't the forces into account when updating the CCD active flags because
+                    //       they have already been integrated into the velocities by the solver.
+                    let ccd_active = ccd_solver.update_ccd_active_flags(
                         islands,
                         bodies,
-                        colliders,
-                        narrow_phase,
-                        ccd_solver,
-                        events,
+                        integration_parameters.dt,
+                        false,
                     );
+                    if ccd_active {
+                        self.run_ccd_motion_clamping(
+                            &integration_parameters,
+                            islands,
+                            bodies,
+                            colliders,
+                            narrow_phase,
+                            ccd_solver,
+                            events,
+                        );
+                    }
                 }
-            }
 
-            self.advance_to_final_positions(islands, bodies, colliders, &mut modified_colliders);
-
-            self.detect_collisions(
-                &integration_parameters,
-                islands,
-                broad_phase,
-                narrow_phase,
-                bodies,
-                colliders,
-                impulse_joints,
-                multibody_joints,
-                &modified_colliders,
-                &[],
-                hooks,
-                events,
-                false,
-            );
-
-            if let Some(queries) = query_pipeline.as_deref_mut() {
-                queries.update_incremental(
+                self.advance_to_final_positions(
+                    islands,
+                    bodies,
                     colliders,
+                    &mut modified_colliders,
+                );
+
+                self.detect_collisions(
+                    &integration_parameters,
+                    islands,
+                    broad_phase,
+                    narrow_phase,
+                    bodies,
+                    colliders,
+                    impulse_joints,
+                    multibody_joints,
                     &modified_colliders,
                     &[],
-                    remaining_substeps == 0,
+                    hooks,
+                    events,
+                    false,
                 );
+
+                if let Some(queries) = query_pipeline.as_deref_mut() {
+                    queries.update_incremental(
+                        colliders,
+                        &modified_colliders,
+                        &[],
+                        remaining_substeps == 0,
+                    );
+                }
+
+                self.clear_modified_colliders(colliders, &mut modified_colliders);
             }
-
-            self.clear_modified_colliders(colliders, &mut modified_colliders);
         }
-
         // Finally, make sure we update the world mass-properties of the rigid-bodies
         // that moved. Otherwise, users may end up applying forces wrt. an outdated
         // center of mass.

@@ -56,6 +56,8 @@ pub struct IntegrationParameters {
     pub min_island_size: usize,
     /// Maximum number of substeps performed by the  solver (default: `1`).
     pub max_ccd_substeps: usize,
+    /// Number of substeps performed.
+    pub substeps: usize,
 }
 
 impl IntegrationParameters {
@@ -169,6 +171,7 @@ impl Default for IntegrationParameters {
             // tons of islands, reducing SIMD parallelism opportunities.
             min_island_size: 128,
             max_ccd_substeps: 1,
+            substeps: 1,
         }
     }
 }
